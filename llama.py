@@ -43,8 +43,8 @@ class RMSNorm(torch.nn.Module):
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        # todo
-        raise NotImplementedError
+        # https://github.com/facebookresearch/llama/blob/main/llama/model.py
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
         """
@@ -82,7 +82,8 @@ class Attention(nn.Module):
     def compute_query_key_value_scores(self,
                                        query: torch.Tensor,
                                        key: torch.Tensor,
-                                       value: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                                       value: torch.Tensor,
+                                       mask: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         '''
         Jointly compute Scaled Dot Product Attention (see Section 3.2.1 in
         https://arxiv.org/abs/1706.03762 for details). The query, key, and
@@ -93,12 +94,19 @@ class Attention(nn.Module):
         Make sure to use attention_dropout (self.attn_dropout) on the computed
         attention matrix before applying it to the value tensor.
         '''
-        # todo
-        raise NotImplementedError
+
+        attn_scores = torch.matmul(query, key.transpose(-1, -2))/(math.sqrt(self.head_dim))
+        if mask is not None:
+            attn_scores = attn_scores + mask
+        attn_probs = self.attn_dropout(attn_scores)
+        attn_probs = torch.softmax(attn_probs, dim=-1)
+
+        return torch.matmul(attn_probs, value)
 
     def forward(
         self,
-        x: torch.Tensor
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
     ):
         '''
         Llama2 uses Grouped-Query Attention. The details of GQA are actually
@@ -131,7 +139,7 @@ class Attention(nn.Module):
         query = query.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
-        output = self.compute_query_key_value_scores(query, key, value)
+        output = self.compute_query_key_value_scores(query, key, value, mask)
 
         # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(batch_size, seqlen, -1)
@@ -196,8 +204,10 @@ class LlamaLayer(nn.Module):
         5) add a residual connection from the unnormalized self-attention output to the
            output of the feed-forward network
         '''
-        # todo
-        raise NotImplementedError
+        # https://github.com/facebookresearch/llama/blob/main/llama/model.py
+        h = x + self.attention(self.attention_norm(x))
+        out = h + self.feed_forward(self.ffn_norm(h))
+        return out
 
 class Llama(LlamaPreTrainedModel):
     def __init__(self, config: LlamaConfig):
@@ -270,12 +280,10 @@ class Llama(LlamaPreTrainedModel):
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] # crop to just the final time step
-            # todo
-            raise NotImplementedError
 
             if temperature == 0.0:
                 # select the single most likely index
-                idx_next = None
+                idx_next = torch.argmax(logits, dim=-1, keepdim=True)
             else:
                 '''
                 Perform temperature sampling:
@@ -284,7 +292,8 @@ class Llama(LlamaPreTrainedModel):
                 3) normalize the scaled logits with a softmax to obtain scaled probabilities.
                 4) sample from the scaled probability distribution.
                 '''
-                idx_next = None
+                probs = torch.softmax(logits / temperature, dim=-1)
+                idx_next = torch.multinomial(probs, 1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 

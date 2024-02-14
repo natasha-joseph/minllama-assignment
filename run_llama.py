@@ -4,6 +4,7 @@ import time, random, numpy as np, argparse, sys, re, os
 from types import SimpleNamespace
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import classification_report, f1_score, recall_score, accuracy_score
@@ -67,7 +68,7 @@ class LlamaDataset(Dataset):
 
 
 # create the data which is a list of (sentence, label, token for the labels)
-def create_data(filename, tokenizer: Tokenizer, flag: str ='train', lower: bool = False, eos: bool = True, prompt_suffix: Optional[str]=None):
+def create_data(filename, tokenizer: Tokenizer, flag: str ='train', lower: bool = False, eos: bool = True, prompt_suffix: Optional[str]=None, prompt_prefix: Optional[str]=None):
 	# specify the tokenizer
 	num_labels = {}
 	data = []
@@ -78,6 +79,8 @@ def create_data(filename, tokenizer: Tokenizer, flag: str ='train', lower: bool 
 			if lower:
 				org_sent = org_sent.lower()
 			sent = org_sent.strip()
+			if prompt_prefix is not None:
+				sent = f"{prompt_prefix} {sent}"
 			if prompt_suffix is not None:
 				sent = f"{sent} {prompt_suffix}"
 			tokens = tokenizer.encode(sent, bos=True, eos=eos)
@@ -159,6 +162,15 @@ def train(args):
 	model = LlamaEmbeddingClassifier(config)
 	model = model.to(device)
 
+	# From now on, we are going to replace dropout with mixout.
+    # Since dropout drops all parameters outgoing from the dropped neuron,
+    # mixout mixes the parameters of the nn.Linear right after the nn.Dropout.
+	for name, module in model.named_modules():
+		if isinstance(module, nn.Dropout):
+			print(name)
+		if isinstance(module, nn.Linear):
+			print(name)
+
 	lr = args.lr
 	## specify the optimizer
 	optimizer = AdamW(model.parameters(), lr=lr)
@@ -176,6 +188,7 @@ def train(args):
 			b_labels = b_labels.to(device)
 
 			optimizer.zero_grad()
+			
 			logits = model(b_ids)
 			loss = F.nll_loss(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
@@ -253,15 +266,16 @@ def test_with_prompting(args):
 			label_name_str = " or ".join(label_names)
 		else:
 			label_name_str = ", ".join(label_names[:-1]) + ", or " + label_names[-1]
-		prompt_suffix=f"Is this movie {label_name_str}? This movie is "
+		prompt_prefix=f"Which of these sentiments best describes the movie in the following review? : {label_name_str}\nreview:"
+		prompt_suffix=f"\nThe movie is "
 		model = LlamaZeroShotClassifier(config, tokenizer, label_names)
 		model = model.to(device)
 
-		dev_data = create_data(args.dev, tokenizer, 'valid', eos=False, prompt_suffix=prompt_suffix)
+		dev_data = create_data(args.dev, tokenizer, 'valid', eos=False, prompt_suffix=prompt_suffix, prompt_prefix=prompt_prefix)
 		dev_dataset = LlamaDataset(dev_data, args, eos=False)
 		dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size, collate_fn=dev_dataset.collate_fn)
 
-		test_data = create_data(args.test, tokenizer, 'test', eos=False, prompt_suffix=prompt_suffix)
+		test_data = create_data(args.test, tokenizer, 'test', eos=False, prompt_suffix=prompt_suffix, prompt_prefix=prompt_prefix)
 		test_dataset = LlamaDataset(test_data, args, eos=False)
 		test_dataloader = DataLoader(test_dataset, shuffle=False, batch_size=args.batch_size, collate_fn=test_dataset.collate_fn)
 
@@ -306,7 +320,7 @@ def get_args():
 	parser.add_argument("--pretrained-model-path", type=str, default="stories42M.pt")
 	parser.add_argument("--max_sentence_len", type=int, default=None)
 	parser.add_argument("--seed", type=int, default=1337)
-	parser.add_argument("--epochs", type=int, default=10)
+	parser.add_argument("--epochs", type=int, default=5)
 	parser.add_argument("--option", type=str,
 						help='prompt: the Llama parameters are frozen; finetune: Llama parameters are updated',
 						choices=('generate', 'prompt', 'finetune'), default="generate")
@@ -320,7 +334,7 @@ def get_args():
 	parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
 	parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
 	parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
-						default=1e-5)
+						default=2e-5)
 
 	args = parser.parse_args()
 	print(f"args: {vars(args)}")

@@ -23,6 +23,12 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(shape)
 
+def rotate_half(x):
+    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+    return torch.cat(
+        (-x2, x1), dim=x1.ndim - 1
+    )
+
 def apply_rotary_emb(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -62,13 +68,33 @@ def apply_rotary_emb(
 
     # First, compute the trigonometric values in the second and fourth columns in
     # slide 22 (linked above).
+    if seqlen > max_seq_len:
+        seqlen = max_seq_len
+    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim)).to(device)
+    seq_idx = torch.arange(seqlen, device = device).float().to(device)
+    freqs = torch.einsum('n,d->nd', seq_idx, inv_freq)
+
+    cos_freqs = freqs.cos()
+    sin_freqs = freqs.sin()
+
+    cos_emb, sin_emb = reshape_for_broadcast(cos_freqs, query_real), reshape_for_broadcast(sin_freqs, query_real)
 
     # Then, combine these trigonometric values with the tensors query_real, query_imag,
     # key_real, and key_imag.
+    q_real = query_real * cos_emb - query_imag * sin_emb
+    q_imag = query_real * sin_emb + query_imag * cos_emb
+    k_real = key_real * cos_emb - key_imag * sin_emb
+    k_imag = key_real * sin_emb + key_imag * cos_emb
+    
+    _, _, _, m = q_real.shape
+    q_final = torch.cat((q_real[:, :, :, 0].contiguous().view(-1, 1), q_imag[:, :, :, 0].contiguous().view(-1, 1)), dim=1)
+    k_final = torch.cat((k_real[:, :, :, 0].contiguous().view(-1, 1), k_imag[:, :, :, 0].contiguous().view(-1, 1)), dim=1)
 
-    raise NotImplementedError
+    for i in range(1,m):
+        q_final = torch.cat((q_final, q_real[:, :, :, i].contiguous().view(-1, 1), q_imag[:, :, :, i].contiguous().view(-1, 1)), dim=1)
+        k_final = torch.cat((k_final, k_real[:, :, :, i].contiguous().view(-1, 1), k_imag[:, :, :, i].contiguous().view(-1, 1)), dim=1)
 
-    query_out = None
-    key_out = None
+    query_out = q_final.view(query.shape)
+    key_out = k_final.view(query.shape)
     # Return the rotary position embeddings for the query and key tensors
     return query_out, key_out
